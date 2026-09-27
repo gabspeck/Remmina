@@ -442,6 +442,7 @@ static UINT remmina_rdp_cliprdr_server_format_data_response(CliprdrClientContext
 
 	const UINT8 *data;
 	size_t size;
+	gboolean ok;
 	rfContext *rfi;
 	RemminaProtocolWidget *gp;
 	rfClipboard *clipboard;
@@ -456,9 +457,15 @@ static UINT remmina_rdp_cliprdr_server_format_data_response(CliprdrClientContext
 	data = formatDataResponse->requestedFormatData;
 #if FREERDP_VERSION_MAJOR >= 3
 	size = formatDataResponse->common.dataLen;
+	ok = (formatDataResponse->common.msgFlags & CB_RESPONSE_OK) != 0;
 #else
 	size = formatDataResponse->dataLen;
+	ok = (formatDataResponse->msgFlags & CB_RESPONSE_OK) != 0;
 #endif
+	if (!ok) {
+		REMMINA_PLUGIN_DEBUG("gp=%p server FormatDataResponse: CB_RESPONSE_FAIL, discarding", gp);
+		size = 0;
+	}
 
 	REMMINA_PLUGIN_DEBUG("gp=%p server FormatDataResponse received: clipboard data arrived form server.", gp);
 	gettimeofday(&now, NULL);
@@ -680,6 +687,8 @@ void remmina_rdp_cliprdr_request_data(GtkClipboard *gtkClipboard, GtkSelectionDa
 				break;
 
 			gtk_main_iteration_do(FALSE);
+			if (GET_PLUGIN_DATA(gp) == NULL)
+				return;	/* disconnected mid-wait: clipboard/mutex may already be freed */
 		}
 
 		if (rc != 0) {
@@ -712,7 +721,6 @@ void remmina_rdp_cliprdr_request_data(GtkClipboard *gtkClipboard, GtkSelectionDa
 			REMMINA_PLUGIN_DEBUG("gp=%p returning %zu bytes of text in clipboard to requesting application", gp, strlen(clipboard->srv_data));
 			gtk_selection_data_set_text(selection_data, clipboard->srv_data, -1);
 		}
-		clipboard->srv_clip_data_wait = SCDW_NONE;
 	} else {
 		REMMINA_PLUGIN_DEBUG("gp=%p cannot paste data to local application because ->srv_data is NULL", gp);
 	}
