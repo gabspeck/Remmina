@@ -149,9 +149,11 @@ struct rf_clipboard {
 	pthread_mutex_t	srv_data_mutex;
 
 	UINT32			server_html_format_id;
+	UINT32			server_filedescriptorw_format_id;
 
 #if FREERDP_VERSION_MAJOR >= 3
 	CliprdrFileContext *	file_context;
+	gboolean		server_file_list_mounted;	/* guarded by ClipboardLock(system) */
 #endif
 
 	/* Stats for clipboard download */

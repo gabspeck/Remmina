@@ -52,7 +52,6 @@
 #define CB_FORMAT_PNG 0xD011
 #define CB_FORMAT_JPEG 0xD012
 #define CB_FORMAT_GIF 0xD013
-#define CB_FORMAT_TEXTURILIST 0xD014
 
 UINT32 remmina_rdp_cliprdr_get_format_from_gdkatom(GdkAtom atom)
 {
@@ -72,8 +71,6 @@ UINT32 remmina_rdp_cliprdr_get_format_from_gdkatom(GdkAtom atom)
 		rc = CB_FORMAT_JPEG;
 	if (g_strcmp0("image/bmp", name) == 0)
 		rc = CF_DIB;
-	if (g_strcmp0("text/uri-list", name) == 0)
-		rc = CB_FORMAT_TEXTURILIST;
 	g_free(name);
 	return rc;
 }
@@ -160,6 +157,47 @@ static rfClipboard *remmina_rdp_cliprdr_clipboard(CliprdrClientContext *context)
 	return (rfClipboard *)context->custom;
 #endif
 }
+
+#if FREERDP_VERSION_MAJOR >= 3
+/* wakes the paste waiting in remmina_rdp_cliprdr_request_data() */
+static void remmina_rdp_cliprdr_signal_transfer_done(rfClipboard *clipboard)
+{
+	pthread_mutex_lock(&clipboard->transfer_clip_mutex);
+	pthread_cond_signal(&clipboard->transfer_clip_cond);
+	clipboard->srv_clip_data_wait = SCDW_NONE;
+	pthread_mutex_unlock(&clipboard->transfer_clip_mutex);
+}
+
+/* top-level entries of the mounted list; g_dir_read_name() never yields "." or "..", unlike WinPR's FGD->uri-list converter */
+static GStrv remmina_rdp_cliprdr_list_received_files(rfClipboard *clipboard)
+{
+	gchar *base_path = NULL;
+	GDir *dir;
+	const gchar *name;
+	GPtrArray *paths;
+
+	ClipboardLock(clipboard->system);
+	if (clipboard->server_file_list_mounted)
+		base_path = g_strdup(ClipboardGetDelegate(clipboard->system)->basePath);
+	ClipboardUnlock(clipboard->system);
+
+	dir = base_path ? g_dir_open(base_path, 0, NULL) : NULL;
+	paths = g_ptr_array_new();
+	if (dir) {
+		while ((name = g_dir_read_name(dir)) != NULL)
+			g_ptr_array_add(paths, g_build_filename(base_path, name, NULL));
+		g_dir_close(dir);
+	}
+	g_free(base_path);
+
+	if (paths->len == 0) {
+		g_ptr_array_free(paths, TRUE);
+		return NULL;
+	}
+	g_ptr_array_add(paths, NULL);
+	return (GStrv)g_ptr_array_free(paths, FALSE);
+}
+#endif
 
 /* Never used? */
 int remmina_rdp_cliprdr_server_file_contents_request(CliprdrClientContext *context, CLIPRDR_FILE_CONTENTS_REQUEST *fileContentsRequest)
@@ -271,6 +309,8 @@ void remmina_rdp_cliprdr_cached_clipboard_free(rfClipboard *clipboard)
 		fmt = clipboard->format;
 		if (fmt == CB_FORMAT_PNG || fmt == CF_DIB || fmt == CF_DIBV5 || fmt == CB_FORMAT_JPEG) {
 			g_object_unref(clipboard->srv_data);
+		} else if (clipboard->server_filedescriptorw_format_id != 0 && fmt == clipboard->server_filedescriptorw_format_id) {
+			g_strfreev((GStrv)clipboard->srv_data);
 		} else {
 			free(clipboard->srv_data);
 		}
@@ -314,6 +354,19 @@ static UINT remmina_rdp_cliprdr_server_format_list(CliprdrClientContext *context
 
 	remmina_rdp_cliprdr_cached_clipboard_free(clipboard);
 	clipboard->server_html_format_id = 0;
+	clipboard->server_filedescriptorw_format_id = 0;
+
+#if FREERDP_VERSION_MAJOR >= 3
+	/* the server owns the clipboard now: any mounted incoming list is stale */
+	ClipboardLock(clipboard->system);
+	clipboard->server_file_list_mounted = FALSE;
+	rc = cliprdr_file_context_notify_new_server_format_list(clipboard->file_context);
+	ClipboardUnlock(clipboard->system);
+	if (rc != CHANNEL_RC_OK) {
+		gtk_target_list_unref(list);
+		return rc;
+	}
+#endif
 
 	REMMINA_PLUGIN_DEBUG("gp=%p: format list from the server:", gp);
 	for (i = 0; i < formatList->numFormats; i++) {
@@ -359,11 +412,6 @@ static UINT remmina_rdp_cliprdr_server_format_list(CliprdrClientContext *context
 			gtkFormatName = "text/html";
 			GdkAtom atom = gdk_atom_intern(gtkFormatName, TRUE);
 			gtk_target_list_add(list, atom, 0, CB_FORMAT_HTML);
-		} else if (format->formatId == CB_FORMAT_TEXTURILIST) {
-			serverFormatName = "CB_FORMAT_TEXTURILIST";
-			gtkFormatName = "text/uri-list";
-			GdkAtom atom = gdk_atom_intern(gtkFormatName, TRUE);
-			gtk_target_list_add(list, atom, 0, CB_FORMAT_TEXTURILIST);
 		} else if (format->formatId == CF_LOCALE) {
 			serverFormatName = "CF_LOCALE";
 		} else if (format->formatId == CF_METAFILEPICT) {
@@ -373,6 +421,15 @@ static UINT remmina_rdp_cliprdr_server_format_list(CliprdrClientContext *context
 			GdkAtom atom = gdk_atom_intern(gtkFormatName, TRUE);
 			gtk_target_list_add(list, atom, 0, format->formatId);
 			clipboard->server_html_format_id = format->formatId;
+#if FREERDP_VERSION_MAJOR >= 3
+		} else if (serverFormatName != NULL && strcmp(serverFormatName, "FileGroupDescriptorW") == 0 &&
+			   cliprdr_file_context_has_local_support(clipboard->file_context)) {
+			gtkFormatName = "text/uri-list";
+			gtk_target_list_add(list, gdk_atom_intern("text/uri-list", TRUE), 0, format->formatId);
+			gtk_target_list_add(list, gdk_atom_intern("x-special/gnome-copied-files", TRUE), 0, format->formatId);
+			gtk_target_list_add(list, gdk_atom_intern("x-special/mate-copied-files", TRUE), 0, format->formatId);
+			clipboard->server_filedescriptorw_format_id = format->formatId;
+#endif
 		}
 		REMMINA_PLUGIN_DEBUG("the server has clipboard format %d: %s -> GTK %s", format->formatId, serverFormatName, gtkFormatName);
 	}
@@ -511,6 +568,31 @@ static UINT remmina_rdp_cliprdr_server_format_data_response(CliprdrClientContext
 	mstrans = timeval_diff(&(clipboard->clientformatdatarequest_tv), &now);
 	REMMINA_PLUGIN_DEBUG("gp=%p %zu bytes transferred from server in %d ms. Speed is %d bytes/sec",
 		gp, (size_t)size, mstrans, mstrans != 0 ? (int)((int64_t)size * 1000 / mstrans) : 0);
+
+#if FREERDP_VERSION_MAJOR >= 3
+	if (clipboard->server_filedescriptorw_format_id != 0 && rfi->clipboard.format == clipboard->server_filedescriptorw_format_id) {
+		GStrv paths = NULL;
+
+		ClipboardLock(clipboard->system);
+		clipboard->server_file_list_mounted = size > 0 &&
+			cliprdr_file_context_update_server_data(clipboard->file_context, clipboard->system, data, size);
+		ClipboardUnlock(clipboard->system);
+
+		paths = remmina_rdp_cliprdr_list_received_files(clipboard);
+		if (!paths) {
+			g_warning("[RDP] rdp_cliprdr: failed to mount the server file list over FUSE (size=%zu), discarding", size);
+			remmina_rdp_cliprdr_signal_transfer_done(clipboard);
+			return CHANNEL_RC_OK;
+		}
+		REMMINA_PLUGIN_DEBUG("gp=%p: server file list mounted over FUSE", gp);
+
+		pthread_mutex_lock(&clipboard->srv_data_mutex);
+		clipboard->srv_data = paths;
+		pthread_mutex_unlock(&clipboard->srv_data_mutex);
+		remmina_rdp_cliprdr_signal_transfer_done(clipboard);
+		return CHANNEL_RC_OK;
+	}
+#endif
 
 	if (size > 0) {
 		switch (rfi->clipboard.format) {
@@ -678,6 +760,20 @@ void remmina_rdp_cliprdr_request_data(GtkClipboard *gtkClipboard, GtkSelectionDa
 		return;
 	}
 
+#if FREERDP_VERSION_MAJOR >= 3
+	if (info == clipboard->server_filedescriptorw_format_id && (clipboard->format != info || clipboard->srv_data == NULL)) {
+		/* mounted already for this server format list: list it again rather than re-request (xf_cliprdr.c caches per format list) */
+		GStrv mounted = remmina_rdp_cliprdr_list_received_files(clipboard);
+		if (mounted) {
+			remmina_rdp_cliprdr_cached_clipboard_free(clipboard);
+			pthread_mutex_lock(&clipboard->srv_data_mutex);
+			clipboard->srv_data = mounted;
+			pthread_mutex_unlock(&clipboard->srv_data_mutex);
+			clipboard->format = info;
+		}
+	}
+#endif
+
 	if (clipboard->format != info || clipboard->srv_data == NULL) {
 		/* We do not have a local cached clipboard, so we have to start a remote request */
 		remmina_rdp_cliprdr_cached_clipboard_free(clipboard);
@@ -753,6 +849,30 @@ void remmina_rdp_cliprdr_request_data(GtkClipboard *gtkClipboard, GtkSelectionDa
 			REMMINA_PLUGIN_DEBUG("gp=%p returning %zu bytes of HTML in clipboard to requesting application", gp, strlen(clipboard->srv_data));
 			GdkAtom atom = gdk_atom_intern("text/html", TRUE);
 			gtk_selection_data_set(selection_data, atom, 8, clipboard->srv_data, strlen(clipboard->srv_data));
+		} else if (info == clipboard->server_filedescriptorw_format_id) {
+			GStrv paths = (GStrv)clipboard->srv_data;
+			GdkAtom target = gtk_selection_data_get_target(selection_data);
+			gchar *targetName = gdk_atom_name(target);
+			guint count = g_strv_length(paths);
+			gchar **uris = g_new0(gchar *, count + 1);
+			guint i;
+
+			for (i = 0; i < count; i++)
+				uris[i] = g_filename_to_uri(paths[i], NULL, NULL);
+
+			if (g_strcmp0(targetName, "text/uri-list") == 0) {
+				gtk_selection_data_set_uris(selection_data, uris);
+			} else {
+				/* as WinPR's convert_filedescriptors_to_{gnome,mate}_copied_files: the gnome length counts the NUL, mate's doesn't */
+				gchar *joined = g_strjoinv("\n", uris);
+				gchar *body = g_strconcat("copy\n", joined, NULL);
+				gtk_selection_data_set(selection_data, target, 8, (const guchar *)body,
+					strlen(body) + (g_strcmp0(targetName, "x-special/gnome-copied-files") == 0 ? 1 : 0));
+				g_free(joined);
+				g_free(body);
+			}
+			g_strfreev(uris);
+			g_free(targetName);
 		} else {
 			REMMINA_PLUGIN_DEBUG("gp=%p returning %zu bytes of text in clipboard to requesting application", gp, strlen(clipboard->srv_data));
 			gtk_selection_data_set_text(selection_data, clipboard->srv_data, -1);
@@ -764,10 +884,19 @@ void remmina_rdp_cliprdr_request_data(GtkClipboard *gtkClipboard, GtkSelectionDa
 
 }
 
-void remmina_rdp_cliprdr_empty_clipboard(GtkClipboard *gtkClipboard, rfClipboard *clipboard)
+void remmina_rdp_cliprdr_empty_clipboard(GtkClipboard *gtkClipboard, RemminaProtocolWidget *gp)
 {
 	TRACE_CALL(__func__);
-	/* No need to do anything here */
+	rfContext *rfi = GET_PLUGIN_DATA(gp);
+
+#if FREERDP_VERSION_MAJOR >= 3
+	if (rfi && rfi->clipboard.file_context) {
+		ClipboardLock(rfi->clipboard.system);
+		cliprdr_file_context_clear(rfi->clipboard.file_context);
+		rfi->clipboard.server_file_list_mounted = FALSE;
+		ClipboardUnlock(rfi->clipboard.system);
+	}
+#endif
 }
 
 CLIPRDR_FORMAT_LIST *remmina_rdp_cliprdr_get_client_format_list(RemminaProtocolWidget *gp)
@@ -1106,6 +1235,8 @@ void remmina_rdp_cliprdr_init(rfContext *rfi, CliprdrClientContext *cliprdr)
 		g_warning("[RDP] rdp_cliprdr: cliprdr_file_context_new() failed, clipboard disabled");
 		return;
 	}
+	if (ClipboardGetFormatId(clipboard->system, "text/uri-list") != 0)
+		cliprdr_file_context_set_locally_available(clipboard->file_context, TRUE);
 #endif
 
 	cliprdr->MonitorReady = remmina_rdp_cliprdr_monitor_ready;
