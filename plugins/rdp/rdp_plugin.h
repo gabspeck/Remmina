@@ -133,6 +133,16 @@ extern RemminaPluginService *remmina_plugin_service;
 #define REMMINA_PLUGIN_AUDIT(fmt, ...) \
 		remmina_plugin_service->_remmina_audit(__func__, fmt, ##__VA_ARGS__)
 
+typedef struct {
+	gunichar2 *	wire_name;	/* cFileName: relative path, backslash-separated, 1..259 units */
+	glong	wire_len;
+	gchar *	abs_path;
+	guint64	size;
+	gint64	mtime;	/* seconds since Unix epoch; may be negative for pre-1970 files */
+	gboolean is_directory;
+	gboolean top_level;	/* selected by the user: symlinks followed (POSIX -H), else never */
+} RemminaRdpOutgoingFile;
+
 struct rf_clipboard {
 	rfContext *		rfi;
 	CliprdrClientContext *	context;
@@ -150,6 +160,11 @@ struct rf_clipboard {
 
 	UINT32			server_html_format_id;
 	UINT32			server_filedescriptorw_format_id;
+
+	/* cliprdr channel thread only; indexed to match CLIPRDR_FILE_CONTENTS_REQUEST::listIndex */
+	GArray *		local_files_flat;	/* RemminaRdpOutgoingFile, NULL when clipboard has no files */
+	gint			local_files_gen;	/* local_selection_gen the list was built for */
+	gint			local_selection_gen;	/* atomic, bumped on every local clipboard change */
 
 #if FREERDP_VERSION_MAJOR >= 3
 	CliprdrFileContext *	file_context;
