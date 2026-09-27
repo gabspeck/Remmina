@@ -41,6 +41,9 @@
 #include <freerdp/freerdp.h>
 #include <freerdp/channels/channels.h>
 #include <freerdp/client/cliprdr.h>
+#if FREERDP_VERSION_MAJOR >= 3
+#include <freerdp/client/client_cliprdr_file.h>
+#endif
 #include <sys/time.h>
 
 #define CLIPBOARD_TRANSFER_WAIT_TIME 6
@@ -148,6 +151,16 @@ static void crlf2lf(UINT8 *data, size_t *size)
 	*size = out - data;
 }
 
+/* cliprdr_file_context_init() takes over CliprdrClientContext::custom for itself */
+static rfClipboard *remmina_rdp_cliprdr_clipboard(CliprdrClientContext *context)
+{
+#if FREERDP_VERSION_MAJOR >= 3
+	return (rfClipboard *)cliprdr_file_context_get_context((CliprdrFileContext *)context->custom);
+#else
+	return (rfClipboard *)context->custom;
+#endif
+}
+
 /* Never used? */
 int remmina_rdp_cliprdr_server_file_contents_request(CliprdrClientContext *context, CLIPRDR_FILE_CONTENTS_REQUEST *fileContentsRequest)
 {
@@ -201,6 +214,10 @@ static void remmina_rdp_cliprdr_send_client_capabilities(rfClipboard *clipboard)
 
 	generalCapabilitySet.version = CB_CAPS_VERSION_2;
 	generalCapabilitySet.generalFlags = CB_USE_LONG_FORMAT_NAMES;
+#if FREERDP_VERSION_MAJOR >= 3
+	/* as xf_cliprdr.c; clipDataId is not honoured when serving, so never offer locking */
+	generalCapabilitySet.generalFlags |= cliprdr_file_context_current_flags(clipboard->file_context) & ~CB_CAN_LOCK_CLIPDATA;
+#endif
 
 	clipboard->context->ClientCapabilities(clipboard->context, &capabilities);
 }
@@ -208,7 +225,7 @@ static void remmina_rdp_cliprdr_send_client_capabilities(rfClipboard *clipboard)
 static UINT remmina_rdp_cliprdr_monitor_ready(CliprdrClientContext *context, const CLIPRDR_MONITOR_READY *monitorReady)
 {
 	TRACE_CALL(__func__);
-	rfClipboard *clipboard = (rfClipboard *)context->custom;
+	rfClipboard *clipboard = remmina_rdp_cliprdr_clipboard(context);
 	RemminaProtocolWidget *gp;
 
 	remmina_rdp_cliprdr_send_client_capabilities(clipboard);
@@ -221,6 +238,25 @@ static UINT remmina_rdp_cliprdr_monitor_ready(CliprdrClientContext *context, con
 static UINT remmina_rdp_cliprdr_server_capabilities(CliprdrClientContext *context, const CLIPRDR_CAPABILITIES *capabilities)
 {
 	TRACE_CALL(__func__);
+#if FREERDP_VERSION_MAJOR >= 3
+	rfClipboard *clipboard = remmina_rdp_cliprdr_clipboard(context);
+	const BYTE *capsPtr = (const BYTE *)capabilities->capabilitySets;
+	UINT32 i;
+
+	if (!cliprdr_file_context_remote_set_flags(clipboard->file_context, 0))
+		return ERROR_INTERNAL_ERROR;
+
+	for (i = 0; i < capabilities->cCapabilitiesSets; i++) {
+		const CLIPRDR_CAPABILITY_SET *caps = (const CLIPRDR_CAPABILITY_SET *)capsPtr;
+
+		if (caps->capabilitySetType == CB_CAPSTYPE_GENERAL) {
+			const CLIPRDR_GENERAL_CAPABILITY_SET *generalCaps = (const CLIPRDR_GENERAL_CAPABILITY_SET *)caps;
+			if (!cliprdr_file_context_remote_set_flags(clipboard->file_context, generalCaps->generalFlags))
+				return ERROR_INTERNAL_ERROR;
+		}
+		capsPtr += caps->capabilitySetLength;
+	}
+#endif
 	return CHANNEL_RC_OK;
 }
 
@@ -263,7 +299,7 @@ static UINT remmina_rdp_cliprdr_server_format_list(CliprdrClientContext *context
 
 	int i;
 
-	clipboard = (rfClipboard *)context->custom;
+	clipboard = remmina_rdp_cliprdr_clipboard(context);
 	gp = clipboard->rfi->protocol_widget;
 
 	REMMINA_PLUGIN_DEBUG("gp=%p: Received a new ServerFormatList from server clipboard. Remmina version = %s",
@@ -413,7 +449,7 @@ static UINT remmina_rdp_cliprdr_server_format_data_request(CliprdrClientContext 
 	RemminaProtocolWidget *gp;
 	rfClipboard *clipboard;
 
-	clipboard = (rfClipboard *)context->custom;
+	clipboard = remmina_rdp_cliprdr_clipboard(context);
 	gp = clipboard->rfi->protocol_widget;
 
 	ui = g_new0(RemminaPluginRdpUiObject, 1);
@@ -450,7 +486,7 @@ static UINT remmina_rdp_cliprdr_server_format_data_response(CliprdrClientContext
 	struct timeval now;
 	int mstrans;
 
-	clipboard = (rfClipboard *)context->custom;
+	clipboard = remmina_rdp_cliprdr_clipboard(context);
 	gp = clipboard->rfi->protocol_widget;
 	rfi = GET_PLUGIN_DATA(gp);
 
@@ -1001,12 +1037,36 @@ void remmina_rdp_clipboard_init(rfContext *rfi)
 	TRACE_CALL(__func__);
 	// Future: initialize rfi->clipboard
 }
+/* as xf_cliprdr_uninit(): the file context still calls into the channel context while clearing, so it goes before FreeRDP frees it */
+void remmina_rdp_cliprdr_uninit(rfContext *rfi, CliprdrClientContext *cliprdr)
+{
+	TRACE_CALL(__func__);
+#if FREERDP_VERSION_MAJOR >= 3
+	if (rfi->clipboard.file_context) {
+		ClipboardLock(rfi->clipboard.system);
+		cliprdr_file_context_uninit(rfi->clipboard.file_context, cliprdr);
+		ClipboardUnlock(rfi->clipboard.system);
+	}
+#endif
+	rfi->clipboard.context = NULL;
+}
+
 void remmina_rdp_clipboard_free(rfContext *rfi)
 {
 	TRACE_CALL(__func__);
 
 	remmina_rdp_cliprdr_cached_clipboard_free(&(rfi->clipboard));
 
+#if FREERDP_VERSION_MAJOR >= 3
+	if (rfi->clipboard.file_context) {
+		cliprdr_file_context_free(rfi->clipboard.file_context);
+		rfi->clipboard.file_context = NULL;
+	}
+#endif
+	if (rfi->clipboard.system) {
+		ClipboardDestroy(rfi->clipboard.system);
+		rfi->clipboard.system = NULL;
+	}
 }
 
 void remmina_rdp_clipboard_abort_client_format_data_request(rfContext *rfi)
@@ -1037,10 +1097,25 @@ void remmina_rdp_cliprdr_init(rfContext *rfi, CliprdrClientContext *cliprdr)
 
 	pthread_mutex_init(&clipboard->srv_data_mutex, NULL);
 
+	clipboard->system = ClipboardCreate();
+
+#if FREERDP_VERSION_MAJOR >= 3
+	/* as xf_cliprdr.c: no file context, no clipboard (cliprdr->custom has to point at one) */
+	clipboard->file_context = cliprdr_file_context_new(clipboard);
+	if (!clipboard->file_context) {
+		g_warning("[RDP] rdp_cliprdr: cliprdr_file_context_new() failed, clipboard disabled");
+		return;
+	}
+#endif
+
 	cliprdr->MonitorReady = remmina_rdp_cliprdr_monitor_ready;
 	cliprdr->ServerCapabilities = remmina_rdp_cliprdr_server_capabilities;
 	cliprdr->ServerFormatList = remmina_rdp_cliprdr_server_format_list;
 	cliprdr->ServerFormatListResponse = remmina_rdp_cliprdr_server_format_list_response;
 	cliprdr->ServerFormatDataRequest = remmina_rdp_cliprdr_server_format_data_request;
 	cliprdr->ServerFormatDataResponse = remmina_rdp_cliprdr_server_format_data_response;
+
+#if FREERDP_VERSION_MAJOR >= 3
+	cliprdr_file_context_init(clipboard->file_context, cliprdr);
+#endif
 }

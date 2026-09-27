@@ -321,7 +321,8 @@ static BOOL rf_process_event_queue(RemminaProtocolWidget *gp)
 			response.dataLen = event->clipboard_formatdataresponse.size;
 #endif
 			response.requestedFormatData = event->clipboard_formatdataresponse.data;
-			rfi->clipboard.context->ClientFormatDataResponse(rfi->clipboard.context, &response);
+			if (rfi->clipboard.context != NULL)
+				rfi->clipboard.context->ClientFormatDataResponse(rfi->clipboard.context, &response);
 			free(event->clipboard_formatdataresponse.data);
 		}
 			break;
@@ -329,7 +330,8 @@ static BOOL rf_process_event_queue(RemminaProtocolWidget *gp)
 		case REMMINA_RDP_EVENT_TYPE_CLIPBOARD_SEND_CLIENT_FORMAT_DATA_REQUEST:
 			REMMINA_PLUGIN_DEBUG("Sending client FormatDataRequest to server");
 			gettimeofday(&(rfi->clipboard.clientformatdatarequest_tv), NULL);
-			rfi->clipboard.context->ClientFormatDataRequest(rfi->clipboard.context, event->clipboard_formatdatarequest.pFormatDataRequest);
+			if (rfi->clipboard.context != NULL)
+				rfi->clipboard.context->ClientFormatDataRequest(rfi->clipboard.context, event->clipboard_formatdatarequest.pFormatDataRequest);
 			free(event->clipboard_formatdatarequest.pFormatDataRequest);
 			break;
 

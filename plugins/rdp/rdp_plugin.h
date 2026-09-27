@@ -46,6 +46,9 @@
 #include <freerdp/gdi/dc.h>
 #include <freerdp/gdi/region.h>
 #include <freerdp/client/cliprdr.h>
+#if FREERDP_VERSION_MAJOR >= 3
+#include <freerdp/client/client_cliprdr_file.h>
+#endif
 #include <freerdp/client/disp.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
@@ -146,6 +149,10 @@ struct rf_clipboard {
 	pthread_mutex_t	srv_data_mutex;
 
 	UINT32			server_html_format_id;
+
+#if FREERDP_VERSION_MAJOR >= 3
+	CliprdrFileContext *	file_context;
+#endif
 
 	/* Stats for clipboard download */
 	struct timeval clientformatdatarequest_tv;
