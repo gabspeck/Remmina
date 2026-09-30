@@ -52,6 +52,7 @@
 
 #define CLIPBOARD_TRANSFER_WAIT_TIME 6
 #define CLIPBOARD_FILE_CHUNK_SIZE (4 * 1024 * 1024)
+#define CLIPBOARD_MAX_LOCKS 16
 
 #define CB_FORMAT_HTML 0xD010
 #define CB_FORMAT_PNG 0xD011
@@ -227,24 +228,85 @@ static GStrv remmina_rdp_cliprdr_list_received_files(rfClipboard *clipboard)
 	g_ptr_array_add(paths, NULL);
 	return (GStrv)g_ptr_array_free(paths, FALSE);
 }
+
+/* as gtk-frdp lock_current_local_files(): keeps this list served under clipDataId until the server unlocks it */
+static void remmina_rdp_cliprdr_lock_local_files(rfClipboard *clipboard, UINT32 clipDataId, GArray *files)
+{
+	if (!clipboard->locked_files)
+		clipboard->locked_files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, (GDestroyNotify)g_array_unref);
+
+	/* every lock can pin a list of its own */
+	if (g_hash_table_size(clipboard->locked_files) >= CLIPBOARD_MAX_LOCKS &&
+	    !g_hash_table_contains(clipboard->locked_files, GUINT_TO_POINTER(clipDataId))) {
+		REMMINA_PLUGIN_DEBUG("too many clipboard locks, ignoring clipDataId %u", clipDataId);
+		return;
+	}
+	g_array_ref(files);
+	g_hash_table_insert(clipboard->locked_files, GUINT_TO_POINTER(clipDataId), files);
+}
+
+static UINT remmina_rdp_cliprdr_server_lock_clipboard_data(CliprdrClientContext *context, const CLIPRDR_LOCK_CLIPBOARD_DATA *lockClipboardData)
+{
+	rfClipboard *clipboard = remmina_rdp_cliprdr_clipboard(context);
+
+	if (clipboard->local_files_flat && clipboard->local_files_gen == g_atomic_int_get(&clipboard->local_selection_gen)) {
+		remmina_rdp_cliprdr_lock_local_files(clipboard, lockClipboardData->clipDataId, clipboard->local_files_flat);
+		clipboard->pending_lock = FALSE;
+	} else {
+		/* no list yet: lock the one built for the next FileGroupDescriptorW request, as gtk-frdp */
+		clipboard->pending_lock = TRUE;
+		clipboard->pending_lock_id = lockClipboardData->clipDataId;
+	}
+	return CHANNEL_RC_OK;
+}
+
+static UINT remmina_rdp_cliprdr_server_unlock_clipboard_data(CliprdrClientContext *context, const CLIPRDR_UNLOCK_CLIPBOARD_DATA *unlockClipboardData)
+{
+	rfClipboard *clipboard = remmina_rdp_cliprdr_clipboard(context);
+
+	if (clipboard->locked_files)
+		g_hash_table_remove(clipboard->locked_files, GUINT_TO_POINTER(unlockClipboardData->clipDataId));
+	if (clipboard->pending_lock && clipboard->pending_lock_id == unlockClipboardData->clipDataId)
+		clipboard->pending_lock = FALSE;
+	return CHANNEL_RC_OK;
+}
 #endif
+
+/* cliprdr channel thread, or after it has been joined */
+static void remmina_rdp_cliprdr_drop_local_files(rfClipboard *clipboard)
+{
+	g_clear_pointer(&clipboard->local_files_flat, g_array_unref);
+#if FREERDP_VERSION_MAJOR >= 3
+	g_clear_pointer(&clipboard->locked_files, g_hash_table_unref);
+	clipboard->pending_lock = FALSE;
+#endif
+}
 
 UINT remmina_rdp_cliprdr_server_file_contents_request(CliprdrClientContext *context, const CLIPRDR_FILE_CONTENTS_REQUEST *fileContentsRequest)
 {
 	TRACE_CALL(__func__);
 	rfClipboard *clipboard = remmina_rdp_cliprdr_clipboard(context);
 	RemminaRdpOutgoingFile *entry;
+	GArray *files = NULL;
 	struct stat st;
 	int fd = -1;
 
 	/* MS-RDPECLIP 2.2.5.3: FILECONTENTS_SIZE and FILECONTENTS_RANGE are mutually exclusive */
-	if ((fileContentsRequest->dwFlags & (FILECONTENTS_SIZE | FILECONTENTS_RANGE)) == (FILECONTENTS_SIZE | FILECONTENTS_RANGE) ||
-	    !clipboard->local_files_flat || fileContentsRequest->listIndex >= clipboard->local_files_flat->len ||
-	    clipboard->local_files_gen != g_atomic_int_get(&clipboard->local_selection_gen))
+	if ((fileContentsRequest->dwFlags & (FILECONTENTS_SIZE | FILECONTENTS_RANGE)) == (FILECONTENTS_SIZE | FILECONTENTS_RANGE))
+		goto fail;
+
+#if FREERDP_VERSION_MAJOR >= 3
+	/* a locked list outlives the selection it was built for, as gtk-frdp */
+	if (fileContentsRequest->haveClipDataId && clipboard->locked_files)
+		files = g_hash_table_lookup(clipboard->locked_files, GUINT_TO_POINTER(fileContentsRequest->clipDataId));
+#endif
+	if (!files && clipboard->local_files_gen == g_atomic_int_get(&clipboard->local_selection_gen))
+		files = clipboard->local_files_flat;
+	if (!files || fileContentsRequest->listIndex >= files->len)
 		goto fail;
 
 	/* one open per request, like client_cliprdr_file.c; below the user's selection never through a symlink */
-	entry = &g_array_index(clipboard->local_files_flat, RemminaRdpOutgoingFile, fileContentsRequest->listIndex);
+	entry = &g_array_index(files, RemminaRdpOutgoingFile, fileContentsRequest->listIndex);
 	fd = open(entry->abs_path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | (entry->top_level ? 0 : O_NOFOLLOW));
 	if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))
 		goto fail;
@@ -323,8 +385,11 @@ static void remmina_rdp_cliprdr_send_client_capabilities(rfClipboard *clipboard)
 	generalCapabilitySet.version = CB_CAPS_VERSION_2;
 	generalCapabilitySet.generalFlags = CB_USE_LONG_FORMAT_NAMES;
 #if FREERDP_VERSION_MAJOR >= 3
-	/* as xf_cliprdr.c; clipDataId is not honoured when serving, so never offer locking */
-	generalCapabilitySet.generalFlags |= cliprdr_file_context_current_flags(clipboard->file_context) & ~CB_CAN_LOCK_CLIPDATA;
+	/* as xf_cliprdr.c; locking keeps a list served after the selection changes, unlocked lists stop being served */
+	generalCapabilitySet.generalFlags |= cliprdr_file_context_current_flags(clipboard->file_context);
+	if ((generalCapabilitySet.generalFlags & CB_STREAM_FILECLIP_ENABLED) &&
+	    (cliprdr_file_context_remote_get_flags(clipboard->file_context) & CB_CAN_LOCK_CLIPDATA))
+		generalCapabilitySet.generalFlags |= CB_CAN_LOCK_CLIPDATA;
 #endif
 
 	clipboard->context->ClientCapabilities(clipboard->context, &capabilities);
@@ -336,6 +401,8 @@ static UINT remmina_rdp_cliprdr_monitor_ready(CliprdrClientContext *context, con
 	rfClipboard *clipboard = remmina_rdp_cliprdr_clipboard(context);
 	RemminaProtocolWidget *gp;
 
+	/* locks are session scoped */
+	remmina_rdp_cliprdr_drop_local_files(clipboard);
 	remmina_rdp_cliprdr_send_client_capabilities(clipboard);
 	gp = clipboard->rfi->protocol_widget;
 	remmina_rdp_cliprdr_send_client_format_list(gp);
@@ -427,8 +494,9 @@ static UINT remmina_rdp_cliprdr_server_format_list(CliprdrClientContext *context
 	clipboard->server_filedescriptorw_format_id = 0;
 
 #if FREERDP_VERSION_MAJOR >= 3
-	/* the server owns the clipboard now: our outgoing list and any mounted incoming list are stale */
+	/* the server owns the clipboard now: our outgoing list and any mounted incoming list are stale, locked lists stay */
 	g_clear_pointer(&clipboard->local_files_flat, g_array_unref);
+	clipboard->pending_lock = FALSE;
 	ClipboardLock(clipboard->system);
 	clipboard->server_file_list_mounted = FALSE;
 	rc = cliprdr_file_context_notify_new_server_format_list(clipboard->file_context);
@@ -1140,6 +1208,10 @@ static void remmina_rdp_cliprdr_send_local_file_list(rfClipboard *clipboard, Rem
 	g_clear_pointer(&clipboard->local_files_flat, g_array_unref);
 	clipboard->local_files_flat = selection ? remmina_rdp_cliprdr_build_outgoing_files(selection->paths, ClipboardGetDelegate(clipboard->system)) : NULL;
 	clipboard->local_files_gen = selection ? selection->gen : 0;
+	/* as gtk-frdp: a lock that arrived before the list was built */
+	if (clipboard->pending_lock && clipboard->local_files_flat)
+		remmina_rdp_cliprdr_lock_local_files(clipboard, clipboard->pending_lock_id, clipboard->local_files_flat);
+	clipboard->pending_lock = FALSE;
 	if (selection) {
 		g_strfreev(selection->paths);
 		g_free(selection);
@@ -1201,7 +1273,7 @@ CLIPRDR_FORMAT_LIST *remmina_rdp_cliprdr_get_client_format_list(RemminaProtocolW
 	retp = NULL;
 	loccount = 0;
 
-	/* a new local selection: stop serving the previous file list (xf_cliprdr.c clears its file context here) */
+	/* a new local selection: stop serving the previous file list unless the server locked it (xf_cliprdr.c clears its file context here) */
 	g_atomic_int_inc(&rfi->clipboard.local_selection_gen);
 
 	/* cheap check only; the walk itself happens lazily in get_clipboard_data() */
@@ -1500,7 +1572,7 @@ void remmina_rdp_clipboard_free(rfContext *rfi)
 
 	remmina_rdp_cliprdr_cached_clipboard_free(&(rfi->clipboard));
 	/* the cliprdr thread that owns this has been joined by now */
-	g_clear_pointer(&rfi->clipboard.local_files_flat, g_array_unref);
+	remmina_rdp_cliprdr_drop_local_files(&rfi->clipboard);
 
 #if FREERDP_VERSION_MAJOR >= 3
 	if (rfi->clipboard.file_context) {
@@ -1567,4 +1639,9 @@ void remmina_rdp_cliprdr_init(rfContext *rfi, CliprdrClientContext *cliprdr)
 #endif
 
 	cliprdr->ServerFileContentsRequest = remmina_rdp_cliprdr_server_file_contents_request;
+#if FREERDP_VERSION_MAJOR >= 3
+	/* FreeRDP's own handlers only track its local_streams, which are not used here */
+	cliprdr->ServerLockClipboardData = remmina_rdp_cliprdr_server_lock_clipboard_data;
+	cliprdr->ServerUnlockClipboardData = remmina_rdp_cliprdr_server_unlock_clipboard_data;
+#endif
 }

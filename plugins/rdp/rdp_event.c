@@ -1000,6 +1000,11 @@ gboolean remmina_rdp_event_on_clipboard(GtkClipboard *gtkClipboard, GdkEvent *ev
 		REMMINA_PLUGIN_DEBUG("gp=%p owner-change: new owner is not me: Sending local clipboard format list to server.",
 			gp, new_owner, gp);
 		pFormatList = remmina_rdp_cliprdr_get_client_format_list(gp);
+		/* nothing to offer: announce nothing, as gtk-frdp */
+		if (pFormatList->numFormats == 0) {
+			free(pFormatList);
+			return TRUE;
+		}
 		rdp_event.type = REMMINA_RDP_EVENT_TYPE_CLIPBOARD_SEND_CLIENT_FORMAT_LIST;
 		rdp_event.clipboard_formatlist.pFormatList = pFormatList;
 		remmina_rdp_event_event_push(gp, &rdp_event);

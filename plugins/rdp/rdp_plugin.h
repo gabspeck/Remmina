@@ -169,6 +169,9 @@ struct rf_clipboard {
 #if FREERDP_VERSION_MAJOR >= 3
 	CliprdrFileContext *	file_context;
 	gboolean		server_file_list_mounted;	/* guarded by ClipboardLock(system) */
+	GHashTable *		locked_files;	/* cliprdr channel thread only; clipDataId -> GArray ref of a list the server locked */
+	gboolean		pending_lock;	/* lock received before the list was built */
+	UINT32			pending_lock_id;
 #endif
 
 	/* Stats for clipboard download */
