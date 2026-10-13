@@ -760,7 +760,13 @@ CLIPRDR_FORMAT_LIST *remmina_rdp_cliprdr_get_client_format_list(RemminaProtocolW
 				REMMINA_PLUGIN_DEBUG("     local clipboard format %s will be sent to remote as %d", name, formatId);
 				g_free(name);
 				formats[srvcount].formatId = formatId;
-				formats[srvcount].formatName = NULL;
+				/* Registered formats are identified by name, not by id */
+				if (formatId == CB_FORMAT_PNG)
+					formats[srvcount].formatName = "image/png";
+				else if (formatId == CB_FORMAT_JPEG)
+					formats[srvcount].formatName = "image/jpeg";
+				else
+					formats[srvcount].formatName = NULL;
 				srvcount++;
 			}
 		}
