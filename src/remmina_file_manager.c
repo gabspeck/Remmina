@@ -176,6 +176,8 @@ void remmina_file_manager_init(void)
 		g_free(remminadir), remminadir = NULL;
 }
 
+/* func gets a metadata-only RemminaFile (no secrets, cannot be saved).
+ * Reload it by filename when credentials are needed. */
 gint remmina_file_manager_iterate(GFunc func, gpointer user_data)
 {
 	TRACE_CALL(__func__);
@@ -195,7 +197,7 @@ gint remmina_file_manager_iterate(GFunc func, gpointer user_data)
 				continue;
 			g_snprintf(filename, MAX_PATH_LEN, "%s/%s",
 				   remmina_data_dir, name);
-			remminafile = remmina_file_load(filename);
+			remminafile = remmina_file_load_metadata(filename);
 			if (remminafile) {
 				(*func)(remminafile, user_data);
 				remmina_file_free(remminafile);
@@ -231,7 +233,7 @@ gchar *remmina_file_manager_get_groups(void)
 		if (!g_str_has_suffix(name, ".remmina"))
 			continue;
 		g_snprintf(filename, MAX_PATH_LEN, "%s/%s", remmina_data_dir, name);
-		remminafile = remmina_file_load(filename);
+		remminafile = remmina_file_load_metadata(filename);
 		if (remminafile) {
 			group = remmina_file_get_string(remminafile, "group");
 			if (group && remmina_string_array_find(array, group) < 0)
@@ -326,7 +328,7 @@ GNode *remmina_file_manager_get_group_tree(void)
 		if (!g_str_has_suffix(name, ".remmina"))
 			continue;
 		g_snprintf(filename, MAX_PATH_LEN, "%s/%s", datadir, name);
-		remminafile = remmina_file_load(filename);
+		remminafile = remmina_file_load_metadata(filename);
 		if (remminafile) {
 			group = remmina_file_get_string(remminafile, "group");
 			remmina_file_manager_add_group(root, group);

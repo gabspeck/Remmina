@@ -346,8 +346,9 @@ static void upgrade_sshkeys_202001(RemminaFile *remminafile)
 	}
 }
 
-RemminaFile *
-remmina_file_load(const gchar *filename)
+/* Without resolve_secrets, encrypted settings are skipped and only noted in spsettings */
+static RemminaFile *
+remmina_file_load_internal(const gchar *filename, gboolean resolve_secrets)
 {
 	TRACE_CALL(__func__);
 	GKeyFile *gkeyfile;
@@ -424,7 +425,11 @@ remmina_file_load(const gchar *filename)
 					break;
 			}
 #endif
-			if ((g_strcmp0(s, ".") == 0) && (secret_service_available)) {
+			if (!resolve_secrets) {
+				/* Note the secret, don't look it up */
+				if (g_strcmp0(s, ".") == 0)
+					g_hash_table_insert(remminafile->spsettings, g_strdup(key), NULL);
+			} else if ((g_strcmp0(s, ".") == 0) && (secret_service_available)) {
 				gchar *sec = secret_plugin->get_password(secret_plugin, remminafile, key);
 				remmina_file_set_string(remminafile, key, sec);
 				/* Annotate in spsettings that this value comes from secret_plugin */
@@ -463,7 +468,27 @@ remmina_file_load(const gchar *filename)
 	g_strfreev(keys);
 	remmina_file_set_statefile(remminafile);
 	g_key_file_free(gkeyfile);
+
+	/* Saving would blank the encrypted settings */
+	if (!resolve_secrets)
+		remminafile->prevent_saving = TRUE;
+
 	return remminafile;
+}
+
+RemminaFile *
+remmina_file_load(const gchar *filename)
+{
+	TRACE_CALL(__func__);
+	return remmina_file_load_internal(filename, TRUE);
+}
+
+/* Load without secrets, so no secret plugin lookups. The result cannot be saved. */
+RemminaFile *
+remmina_file_load_metadata(const gchar *filename)
+{
+	TRACE_CALL(__func__);
+	return remmina_file_load_internal(filename, FALSE);
 }
 
 void remmina_file_set_string(RemminaFile *remminafile, const gchar *setting, const gchar *value)
