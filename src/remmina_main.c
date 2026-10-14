@@ -1045,7 +1045,7 @@ void remmina_main_on_action_connection_delete(GSimpleAction *action, GVariant *p
 	if (!remminamain->priv->selected_filename)
 		return;
 
-	RemminaFile *remminafile = remmina_file_load(remminamain->priv->selected_filename);
+	RemminaFile *remminafile = remmina_file_load_metadata(remminamain->priv->selected_filename);
 
 	if (((remmina_pref_get_boolean("lock_edit")
 				&& remmina_pref_get_boolean("use_primary_password"))
@@ -1181,7 +1181,7 @@ void remmina_main_on_action_connection_delete_multiple(GSimpleAction *action, GV
 			gtk_tree_model_get(model, &iter, 
 					FILENAME_COLUMN, &file_to_delete, -1);
 
-			RemminaFile *remminafile = remmina_file_load(file_to_delete);
+			RemminaFile *remminafile = remmina_file_load_metadata(file_to_delete);
 
 			if (((remmina_pref_get_boolean("lock_edit")
 					&& remmina_pref_get_boolean("use_primary_password"))

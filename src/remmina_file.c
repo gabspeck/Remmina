@@ -925,14 +925,31 @@ remmina_file_dup_temp_protocol(RemminaFile *remminafile, const gchar *new_protoc
 	return tmp;
 }
 
+/* Delete the secrets listed in spsettings from the secret plugin */
+static void remmina_file_delete_secrets(RemminaFile *remminafile)
+{
+	TRACE_CALL(__func__);
+	RemminaSecretPlugin *secret_plugin = remmina_plugin_manager_get_secret_plugin();
+	GHashTableIter iter;
+	const gchar *key;
+
+	if (!secret_plugin || !secret_plugin->is_service_available(secret_plugin))
+		return;
+
+	g_hash_table_iter_init(&iter, remminafile->spsettings);
+	while (g_hash_table_iter_next(&iter, (gpointer *)&key, NULL))
+		secret_plugin->delete_password(secret_plugin, remminafile, key);
+}
+
 void remmina_file_delete(const gchar *filename)
 {
 	TRACE_CALL(__func__);
 	RemminaFile *remminafile;
 
-	remminafile = remmina_file_load(filename);
+	/* Metadata is enough to know which secrets to delete */
+	remminafile = remmina_file_load_metadata(filename);
 	if (remminafile) {
-		remmina_file_unsave_passwords(remminafile);
+		remmina_file_delete_secrets(remminafile);
 		remmina_file_free(remminafile);
 	}
 	g_unlink(filename);
