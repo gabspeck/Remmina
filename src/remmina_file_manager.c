@@ -303,39 +303,45 @@ static void remmina_file_manager_add_group(GNode *node, const gchar *group)
 		g_free(p1);
 }
 
-GNode *remmina_file_manager_get_group_tree(void)
+/* Metadata-only RemminaFiles of every profile, so callers can read the data dir once */
+GPtrArray *remmina_file_manager_load_all_metadata(void)
 {
 	TRACE_CALL(__func__);
 	gchar filename[MAX_PATH_LEN];
 	GDir *dir;
-	g_autofree gchar *datadir = NULL;
 	const gchar *name;
 	RemminaFile *remminafile;
-	const gchar *group;
+	gchar *remmina_data_dir;
+	GPtrArray *files;
+
+	files = g_ptr_array_new_with_free_func((GDestroyNotify)remmina_file_free);
+	remmina_data_dir = remmina_file_get_datadir();
+	dir = g_dir_open(remmina_data_dir, 0, NULL);
+
+	if (dir) {
+		while ((name = g_dir_read_name(dir)) != NULL) {
+			if (!g_str_has_suffix(name, ".remmina"))
+				continue;
+			g_snprintf(filename, MAX_PATH_LEN, "%s/%s", remmina_data_dir, name);
+			remminafile = remmina_file_load_metadata(filename);
+			if (remminafile)
+				g_ptr_array_add(files, remminafile);
+		}
+		g_dir_close(dir);
+	}
+	g_free(remmina_data_dir);
+	return files;
+}
+
+GNode *remmina_file_manager_get_group_tree(GPtrArray *files)
+{
+	TRACE_CALL(__func__);
 	GNode *root;
+	guint i;
 
 	root = g_node_new(NULL);
-
-	datadir = g_strdup(remmina_file_get_datadir());
-	dir = g_dir_open(datadir, 0, NULL);
-
-	if (dir == NULL) {
-		g_free(datadir);
-		datadir = NULL;
-		return root;
-	}
-	while ((name = g_dir_read_name(dir)) != NULL) {
-		if (!g_str_has_suffix(name, ".remmina"))
-			continue;
-		g_snprintf(filename, MAX_PATH_LEN, "%s/%s", datadir, name);
-		remminafile = remmina_file_load_metadata(filename);
-		if (remminafile) {
-			group = remmina_file_get_string(remminafile, "group");
-			remmina_file_manager_add_group(root, group);
-			remmina_file_free(remminafile);
-		}
-	}
-	g_dir_close(dir);
+	for (i = 0; i < files->len; i++)
+		remmina_file_manager_add_group(root, remmina_file_get_string(g_ptr_array_index(files, i), "group"));
 	return root;
 }
 

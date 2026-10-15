@@ -51,9 +51,11 @@ gchar *remmina_file_get_datadir(void);
 void remmina_file_manager_init(void);
 /* Iterate all .remmina connections in the home directory */
 gint remmina_file_manager_iterate(GFunc func, gpointer user_data);
+/* Load all .remmina connections without secrets */
+GPtrArray *remmina_file_manager_load_all_metadata(void);
 /* Get a list of groups */
 gchar *remmina_file_manager_get_groups(void);
-GNode *remmina_file_manager_get_group_tree(void);
+GNode *remmina_file_manager_get_group_tree(GPtrArray *files);
 void remmina_file_manager_free_group_tree(GNode *node);
 /* Load or import a file */
 RemminaFile *remmina_file_manager_load_file(const gchar *filename);
