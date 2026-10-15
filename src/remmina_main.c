@@ -398,7 +398,12 @@ static void remmina_main_load_file_list_callback(RemminaFile *remminafile, gpoin
 	g_free(datetime);
 }
 
-static gboolean remmina_main_load_file_tree_traverse(GNode *node, GtkTreeStore *store, GtkTreeIter *parent)
+typedef struct {
+	GtkTreeStore *	store;
+	GHashTable *	group_iters;	/* group -> GtkTreeIter of its row */
+} RemminaMainTreeLoad;
+
+static gboolean remmina_main_load_file_tree_traverse(GNode *node, GtkTreeStore *store, GtkTreeIter *parent, GHashTable *group_iters)
 {
 	TRACE_CALL(__func__);
 	GtkTreeIter *iter;
@@ -418,21 +423,12 @@ static gboolean remmina_main_load_file_tree_traverse(GNode *node, GtkTreeStore *
 				   FILENAME_COLUMN, NULL,
 				   LABELS_COLUMN, data->labels,
 				   -1);
+		g_hash_table_insert(group_iters, g_strdup(data->group), gtk_tree_iter_copy(iter));
 	}
 	for (child = g_node_first_child(node); child; child = g_node_next_sibling(child))
-		remmina_main_load_file_tree_traverse(child, store, iter);
+		remmina_main_load_file_tree_traverse(child, store, iter, group_iters);
 	g_free(iter);
 	return FALSE;
-}
-
-static void remmina_main_load_file_tree_group(GtkTreeStore *store)
-{
-	TRACE_CALL(__func__);
-	GNode *root;
-
-	root = remmina_file_manager_get_group_tree();
-	remmina_main_load_file_tree_traverse(root, store, NULL);
-	remmina_file_manager_free_group_tree(root);
 }
 
 static void remmina_main_expand_group_traverse(GtkTreeIter *iter)
@@ -473,40 +469,13 @@ static void remmina_main_expand_group(void)
 		remmina_main_expand_group_traverse(&iter);
 }
 
-static gboolean remmina_main_load_file_tree_find(GtkTreeModel *tree, GtkTreeIter *iter, const gchar *match_group)
-{
-	TRACE_CALL(__func__);
-	gboolean ret, match;
-	gchar *group, *filename;
-	GtkTreeIter child;
-
-	match = FALSE;
-	ret = TRUE;
-	while (ret) {
-		gtk_tree_model_get(tree, iter, GROUP_COLUMN, &group, FILENAME_COLUMN, &filename, -1);
-		match = (filename == NULL && g_strcmp0(group, match_group) == 0);
-		g_free(group);
-		g_free(filename);
-		if (match)
-			break;
-		if (gtk_tree_model_iter_children(tree, &child, iter)) {
-			match = remmina_main_load_file_tree_find(tree, &child, match_group);
-			if (match) {
-				memcpy(iter, &child, sizeof(GtkTreeIter));
-				break;
-			}
-		}
-		ret = gtk_tree_model_iter_next(tree, iter);
-	}
-	return match;
-}
-
 static void remmina_main_load_file_tree_callback(RemminaFile *remminafile, gpointer user_data)
 {
 	TRACE_CALL(__func__);
-	GtkTreeIter iter, child;
-	GtkTreeStore *store;
-	gboolean found;
+	RemminaMainTreeLoad *load = user_data;
+	GtkTreeIter child;
+	GtkTreeIter *parent;
+	const gchar *group;
 	gchar *datetime = NULL;
 	gchar* status_icon = "";
 	if (remmina_pref_get_boolean("status_check")){
@@ -524,16 +493,12 @@ static void remmina_main_load_file_tree_callback(RemminaFile *remminafile, gpoin
 		}
 	}
 
-	store = GTK_TREE_STORE(user_data);
-
-	found = FALSE;
-	if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(store), &iter))
-		found = remmina_main_load_file_tree_find(GTK_TREE_MODEL(store), &iter,
-							 remmina_file_get_string(remminafile, "group"));
+	group = remmina_file_get_string(remminafile, "group");
+	parent = group ? g_hash_table_lookup(load->group_iters, group) : NULL;
 
 	datetime = remmina_file_get_datetime(remminafile);
-	gtk_tree_store_append(store, &child, (found ? &iter : NULL));
-	gtk_tree_store_set(store, &child,
+	gtk_tree_store_append(load->store, &child, parent);
+	gtk_tree_store_set(load->store, &child,
 			   PROTOCOL_COLUMN, remmina_file_get_icon_name(remminafile),
 			   NAME_COLUMN, remmina_file_get_string(remminafile, "name"),
 			   NOTES_COLUMN, g_uri_unescape_string(remmina_file_get_string(remminafile, "notes_text"), NULL),
@@ -546,6 +511,31 @@ static void remmina_main_load_file_tree_callback(RemminaFile *remminafile, gpoin
 			   STATUS_COLUMN, status_icon,
 			   -1);
 	g_free(datetime);
+}
+
+/* Group rows, then each profile under its group row, reading the data dir once */
+static gint remmina_main_load_file_tree(GtkTreeStore *store)
+{
+	TRACE_CALL(__func__);
+	GPtrArray *files;
+	GNode *root;
+	RemminaMainTreeLoad load;
+	gint items_count;
+
+	files = remmina_file_manager_load_all_metadata();
+	load.store = store;
+	load.group_iters = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, (GDestroyNotify)gtk_tree_iter_free);
+
+	root = remmina_file_manager_get_group_tree(files);
+	remmina_main_load_file_tree_traverse(root, store, NULL, load.group_iters);
+	remmina_file_manager_free_group_tree(root);
+
+	g_ptr_array_foreach(files, (GFunc)remmina_main_load_file_tree_callback, &load);
+	items_count = files->len;
+
+	g_hash_table_destroy(load.group_iters);
+	g_ptr_array_free(files, TRUE);
+	return items_count;
 }
 
 static void remmina_main_file_model_on_sort(GtkTreeSortable *sortable, gpointer user_data)
@@ -715,10 +705,8 @@ static void remmina_main_load_files(void)
 		newmodel = GTK_TREE_MODEL(gtk_tree_store_new(10, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING));
 		/* Hide the Group column in the tree view mode */
 		gtk_tree_view_column_set_visible(remminamain->column_files_list_group, FALSE);
-		/* Load groups first */
-		remmina_main_load_file_tree_group(GTK_TREE_STORE(newmodel));
-		/* Load files list */
-		items_count = remmina_file_manager_iterate((GFunc)remmina_main_load_file_tree_callback, (gpointer)newmodel);
+		/* Load groups and files list */
+		items_count = remmina_main_load_file_tree(GTK_TREE_STORE(newmodel));
 		break;
 
 	case REMMINA_VIEW_FILE_LIST:
@@ -1045,7 +1033,7 @@ void remmina_main_on_action_connection_delete(GSimpleAction *action, GVariant *p
 	if (!remminamain->priv->selected_filename)
 		return;
 
-	RemminaFile *remminafile = remmina_file_load(remminamain->priv->selected_filename);
+	RemminaFile *remminafile = remmina_file_load_metadata(remminamain->priv->selected_filename);
 
 	if (((remmina_pref_get_boolean("lock_edit")
 				&& remmina_pref_get_boolean("use_primary_password"))
@@ -1181,7 +1169,7 @@ void remmina_main_on_action_connection_delete_multiple(GSimpleAction *action, GV
 			gtk_tree_model_get(model, &iter, 
 					FILENAME_COLUMN, &file_to_delete, -1);
 
-			RemminaFile *remminafile = remmina_file_load(file_to_delete);
+			RemminaFile *remminafile = remmina_file_load_metadata(file_to_delete);
 
 			if (((remmina_pref_get_boolean("lock_edit")
 					&& remmina_pref_get_boolean("use_primary_password"))

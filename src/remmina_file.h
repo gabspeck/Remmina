@@ -88,6 +88,8 @@ const gchar *remmina_file_get_filename(RemminaFile *remminafile);
 const gchar *remmina_file_get_statefile(RemminaFile *remminafile);
 /* Load a new .remmina file and return the allocated RemminaFile object */
 RemminaFile *remmina_file_load(const gchar *filename);
+/* Same, without secrets; the result cannot be saved */
+RemminaFile *remmina_file_load_metadata(const gchar *filename);
 /* Settings get/set functions */
 void remmina_file_set_string(RemminaFile *remminafile, const gchar *setting, const gchar *value);
 const gchar *remmina_file_get_string(RemminaFile *remminafile, const gchar *setting);
