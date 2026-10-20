@@ -1,0 +1,79 @@
+# remmina-plugin-applehp - The GTK+ Remote Desktop Client
+#
+# Copyright (C) 2026 Gabriel Speckhahn
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor,
+# Boston, MA  02110-1301, USA.
+#
+# In addition, as a special exception, the copyright holders give
+# permission to link the code of portions of this program with the
+# OpenSSL library under certain conditions as described in each
+# individual source file, and distribute linked combinations
+# including the two.
+# You must obey the GNU General Public License in all respects
+# for all of the code used other than OpenSSL. If you modify
+# file(s) with this exception, you may extend this exception to your
+# version of the file(s), but you are not obligated to do so. If you
+# do not wish to do so, delete this exception statement from your
+# version. If you delete this exception statement from all source
+# files in the program, then also delete it here.
+
+
+
+set(REMMINA_PLUGIN_APPLEHP_SRCS
+	applehp_plugin.c
+	applehp_plugin.h
+	ard_crypto.c
+	ard_crypto.h
+	ard_decode.c
+	ard_decode.h
+	ard_log.h
+	ard_media.c
+	ard_media.h
+	ard_pasteboard.c
+	ard_pasteboard.h
+	ard_receiver.c
+	ard_receiver.h
+	ard_session.c
+	ard_session.h
+	ard_wire.h
+)
+
+add_library(remmina-plugin-applehp MODULE ${REMMINA_PLUGIN_APPLEHP_SRCS})
+set_target_properties(remmina-plugin-applehp PROPERTIES PREFIX "")
+set_target_properties(remmina-plugin-applehp PROPERTIES NO_SONAME 1)
+
+include_directories(${REMMINA_COMMON_INCLUDE_DIRS})
+target_link_libraries(remmina-plugin-applehp
+	${REMMINA_COMMON_LIBRARIES}
+	PkgConfig::APPLEHP_FFMPEG
+	OpenSSL::Crypto
+	ZLIB::ZLIB
+	m)
+
+if(APPLEHP_PULSE_FOUND)
+	target_compile_definitions(remmina-plugin-applehp PRIVATE HAVE_PULSE)
+	target_link_libraries(remmina-plugin-applehp PkgConfig::APPLEHP_PULSE)
+endif()
+
+install(TARGETS remmina-plugin-applehp DESTINATION ${REMMINA_PLUGINDIR})
+
+install(FILES
+    scalable/emblems/org.remmina.Remmina-applehp-symbolic.svg
+    DESTINATION ${APPICONSCALE_EMBLEMS_DIR})
+
+if(WITH_ICON_CACHE)
+    gtk_update_icon_cache("${REMMINA_DATADIR}/icons/hicolor")
+endif()
