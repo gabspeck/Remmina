@@ -86,6 +86,8 @@ void remmina_rdp_OnChannelDisconnectedEventHandler(void *context, CONST_ARG Chan
 	if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0) {
 		if (freerdp_settings_get_bool(rfi->clientContext.context.settings, FreeRDP_SoftwareGdi))
 			gdi_graphics_pipeline_uninit(rfi->clientContext.context.gdi, (RdpgfxClientContext*) e->pInterface);
+	} else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
+		remmina_rdp_cliprdr_uninit(rfi, (CliprdrClientContext*)e->pInterface);
 	}
 	REMMINA_PLUGIN_DEBUG("Channel %s has been closed", e->name);
 

@@ -46,6 +46,9 @@
 #include <freerdp/gdi/dc.h>
 #include <freerdp/gdi/region.h>
 #include <freerdp/client/cliprdr.h>
+#if FREERDP_VERSION_MAJOR >= 3
+#include <freerdp/client/client_cliprdr_file.h>
+#endif
 #include <freerdp/client/disp.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
@@ -130,6 +133,16 @@ extern RemminaPluginService *remmina_plugin_service;
 #define REMMINA_PLUGIN_AUDIT(fmt, ...) \
 		remmina_plugin_service->_remmina_audit(__func__, fmt, ##__VA_ARGS__)
 
+typedef struct {
+	gunichar2 *	wire_name;	/* cFileName: relative path, backslash-separated, 1..259 units */
+	glong	wire_len;
+	gchar *	abs_path;
+	guint64	size;
+	gint64	mtime;	/* seconds since Unix epoch; may be negative for pre-1970 files */
+	gboolean is_directory;
+	gboolean top_level;	/* selected by the user: symlinks followed (POSIX -H), else never */
+} RemminaRdpOutgoingFile;
+
 struct rf_clipboard {
 	rfContext *		rfi;
 	CliprdrClientContext *	context;
@@ -146,6 +159,20 @@ struct rf_clipboard {
 	pthread_mutex_t	srv_data_mutex;
 
 	UINT32			server_html_format_id;
+	UINT32			server_filedescriptorw_format_id;
+
+	/* cliprdr channel thread only; indexed to match CLIPRDR_FILE_CONTENTS_REQUEST::listIndex */
+	GArray *		local_files_flat;	/* RemminaRdpOutgoingFile, NULL when clipboard has no files */
+	gint			local_files_gen;	/* local_selection_gen the list was built for */
+	gint			local_selection_gen;	/* atomic, bumped on every local clipboard change */
+
+#if FREERDP_VERSION_MAJOR >= 3
+	CliprdrFileContext *	file_context;
+	gboolean		server_file_list_mounted;	/* guarded by ClipboardLock(system) */
+	GHashTable *		locked_files;	/* cliprdr channel thread only; clipDataId -> GArray ref of a list the server locked */
+	gboolean		pending_lock;	/* lock received before the list was built */
+	UINT32			pending_lock_id;
+#endif
 
 	/* Stats for clipboard download */
 	struct timeval clientformatdatarequest_tv;
